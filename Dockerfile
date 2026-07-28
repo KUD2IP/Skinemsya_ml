@@ -17,16 +17,21 @@ WORKDIR /srv
 
 COPY pyproject.toml ./
 COPY app ./app
-# rapidocr тянет полный opencv-python (GUI-зависимости); в контейнере
-# он не нужен — заменяем на headless.
-RUN pip install . \
-    && pip uninstall -y opencv-python opencv-contrib-python \
-    && pip install --force-reinstall "opencv-python-headless>=4.10"
+
+# Сначала headless OpenCV, затем пакет: так полный opencv-python
+# либо не ставится, либо сразу вычищается — меньше пик диска при сборке.
+RUN pip install --no-cache-dir "opencv-python-headless>=4.10" \
+    && pip install --no-cache-dir . \
+    && pip uninstall -y opencv-python opencv-contrib-python || true \
+    && pip install --no-cache-dir --force-reinstall "opencv-python-headless>=4.10" \
+    && find /usr/local/lib -type d -name '__pycache__' -prune -exec rm -rf {} + \
+    && rm -rf /tmp/* /root/.cache
 
 # Скачиваем и прогреваем модели PP-OCRv5 на этапе сборки:
 # контейнеру в рантайме сеть для моделей не нужна.
 COPY scripts/download_models.py ./scripts/download_models.py
-RUN python scripts/download_models.py
+RUN python scripts/download_models.py \
+    && rm -rf /tmp/* /root/.cache
 
 EXPOSE 8000
 

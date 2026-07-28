@@ -25,6 +25,24 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Free disk space
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "Disk before cleanup:"
+        df -h
+        sudo rm -rf /usr/share/dotnet \
+          /usr/local/lib/android \
+          /opt/ghc \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/local/.ghcup \
+          /usr/share/swift \
+          /usr/local/share/powershell \
+          /usr/lib/jvm || true
+        sudo docker system prune -af || true
+        echo "Disk after cleanup:"
+        df -h
+
     - name: Build tag list
       id: tags
       shell: bash
@@ -66,8 +84,19 @@ runs:
         context: .
         push: ${{ inputs.push }}
         tags: ${{ steps.tags.outputs.list }}
+        # mode=min: меньше кэша на диске раннера (mode=max часто даёт ENOSPC на ML-образах).
         cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-to: type=gha,mode=min
+        provenance: false
+        sbom: false
+
+    - name: Free disk before Trivy
+      if: inputs.push == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker builder prune -af || true
+        df -h
 
     - name: Trivy scan
       if: inputs.push == 'true'
