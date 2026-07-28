@@ -6,6 +6,8 @@
 5xx заставит бек делать retry, который упадёт так же.
 """
 
+import asyncio
+import contextlib
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -23,12 +25,32 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024  # лимит из контракта бек�
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    # Прогреваем модель на старте, чтобы первый запрос не съел таймаут бека.
-    started = time.monotonic()
-    ocr.get_engine()
-    logger.info("OCR engine ready in %.1fs", time.monotonic() - started)
-    yield
+async def lifespan(app: FastAPI):
+    # Не блокируем yield: иначе /healthz молчит, пока OCR грузится в RAM,
+    # а на 1 ГБ VPS это часто минуты или OOM — деплой считает сервис мёртвым.
+    app.state.ocr_ready = False
+    app.state.ocr_error = None
+
+    def _warmup() -> None:
+        started = time.monotonic()
+        ocr.get_engine()
+        logger.info("OCR engine ready in %.1fs", time.monotonic() - started)
+
+    async def _warmup_bg() -> None:
+        try:
+            await asyncio.to_thread(_warmup)
+            app.state.ocr_ready = True
+        except Exception as exc:
+            app.state.ocr_error = str(exc)
+            logger.exception("OCR warmup failed")
+
+    task = asyncio.create_task(_warmup_bg())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 app = FastAPI(title="Skinemsya ML", version="0.1.0", lifespan=lifespan)
@@ -36,7 +58,21 @@ app = FastAPI(title="Skinemsya ML", version="0.1.0", lifespan=lifespan)
 
 @app.get("/healthz")
 async def healthz() -> dict:
+    """Liveness: процесс жив и принимает HTTP (OCR может ещё грузиться)."""
     return {"status": "ok"}
+
+
+@app.get("/readyz")
+async def readyz():
+    """Readiness: OCR прогрет и готов обрабатывать чеки."""
+    if getattr(app.state, "ocr_ready", False):
+        return {"status": "ok"}
+    if getattr(app.state, "ocr_error", None):
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "detail": app.state.ocr_error},
+        )
+    return JSONResponse(status_code=503, content={"status": "loading"})
 
 
 @app.post("/api/v1/recognize", response_model=ReceiptResponse)

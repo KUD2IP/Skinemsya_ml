@@ -62,7 +62,9 @@ ML слушает только `127.0.0.1:8001` на хосте.
 1. CI пишет `deploy/.env` из секрета + `APP_VERSION` / `GHCR_OWNER`.
 2. `rsync` → `/opt/skinemsya/deploy/ml/`.
 3. `docker compose pull ml && up -d ml`.
-4. Health: `curl http://127.0.0.1:8001/healthz` (до ~3 мин на прогрев OCR).
+4. Liveness: `curl http://127.0.0.1:8001/healthz` (сразу после старта uvicorn).
+   Readiness: `curl http://127.0.0.1:8001/readyz` (после прогрева OCR, до ~5 мин на слабом CPU).
+   На 1 ГБ VPS желателен swap 1–2 ГБ — иначе возможен OOM при загрузке ONNX.
 5. При фейле — откат на `.previous-version`.
 
 ## Локальная проверка образа

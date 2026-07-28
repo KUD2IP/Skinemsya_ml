@@ -20,6 +20,9 @@ services:
       - '127.0.0.1:8001:8000'
     environment:
       ML_OCR_THREADS: ${ML_OCR_THREADS:-1}
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
       # Опционально: дообученная модель (смонтировать volume и раскомментировать)
       # ML_REC_MODEL_PATH: /custom/receipt_rec.onnx
       # ML_REC_KEYS_PATH: /custom/receipt_keys.txt
@@ -30,8 +33,10 @@ services:
       interval: 15s
       timeout: 5s
       retries: 8
-      start_period: 90s
+      start_period: 120s
+    # На 1 ГБ VPS лимит 768M часто даёт OOM при загрузке ONNX → рестарт-луп.
+    # Нужен swap (1–2 ГБ) на VPS, иначе лучше не крутить бек+ML на одной 1 ГБ машине.
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: 950M

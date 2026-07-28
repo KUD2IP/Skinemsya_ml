@@ -46,17 +46,37 @@ runs:
         private_key: ${{ inputs.ssh_private_key }}
         known_hosts: ${{ inputs.ssh_known_hosts }}
 
-    - name: Sync deploy files
+    - name: Remember previous version and sync deploy files
       shell: bash
       env:
         PRODUCTION_HOST: ${{ inputs.production_host }}
         PRODUCTION_USER: ${{ inputs.production_user }}
         SSH_OPTS: ${{ steps.ssh.outputs.ssh_opts }}
         DEPLOY_PATH: /opt/skinemsya/deploy/ml
+        APP_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        ssh $SSH_OPTS "${PRODUCTION_USER}@${PRODUCTION_HOST}" "mkdir -p ${DEPLOY_PATH}"
-        rsync -avz -e "ssh $SSH_OPTS" deploy/ "${PRODUCTION_USER}@${PRODUCTION_HOST}:${DEPLOY_PATH}/"
+        ssh $SSH_OPTS "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
+          "DEPLOY_PATH=${DEPLOY_PATH} APP_VERSION=${APP_VERSION}" bash -s <<'EOSSH'
+        set -euo pipefail
+        mkdir -p "${DEPLOY_PATH}"
+        PREVIOUS_FILE="${DEPLOY_PATH}/.previous-version"
+        ENV_FILE="${DEPLOY_PATH}/.env"
+        current_version=""
+        if [ -f "${ENV_FILE}" ]; then
+          current_version="$(grep -E '^APP_VERSION=' "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)"
+        fi
+        if [ -n "${current_version}" ] && [ "${current_version}" != "${APP_VERSION}" ]; then
+          printf '%s\n' "${current_version}" > "${PREVIOUS_FILE}"
+          chmod 600 "${PREVIOUS_FILE}"
+          echo "Saved previous version: ${current_version}"
+        else
+          echo "No previous version to save (current='${current_version}', target='${APP_VERSION}')"
+        fi
+        EOSSH
+        rsync -avz -e "ssh $SSH_OPTS" \
+          --exclude '.previous-version' \
+          deploy/ "${PRODUCTION_USER}@${PRODUCTION_HOST}:${DEPLOY_PATH}/"
 
     - name: Deploy with health check and rollback
       shell: bash
@@ -74,22 +94,17 @@ runs:
         ENV_FILE="${DEPLOY_PATH}/.env"
         PREVIOUS_FILE="${DEPLOY_PATH}/.previous-version"
         HEALTH_URL="http://127.0.0.1:8001/healthz"
+        READY_URL="http://127.0.0.1:8001/readyz"
 
         chmod 600 "${ENV_FILE}"
 
-        current_version=""
-        if [ -f "${ENV_FILE}" ]; then
-          current_version="$(grep -E '^APP_VERSION=' "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)"
-        fi
-        if [ -n "${current_version}" ] && [ "${current_version}" != "${APP_VERSION}" ]; then
-          printf '%s\n' "${current_version}" > "${PREVIOUS_FILE}"
-          chmod 600 "${PREVIOUS_FILE}"
-        fi
-
         cd "${DEPLOY_PATH}"
         # Логин в GHCR нужен один раз на сервере (docker login ghcr.io).
-        APP_VERSION="${APP_VERSION}" docker compose -f docker-compose.prod.yml pull ml
-        APP_VERSION="${APP_VERSION}" docker compose -f docker-compose.prod.yml up -d ml
+        compose() {
+          docker compose --env-file "${ENV_FILE}" -f docker-compose.prod.yml "$@"
+        }
+        APP_VERSION="${APP_VERSION}" compose pull ml
+        APP_VERSION="${APP_VERSION}" compose up -d --force-recreate ml
 
         rollback() {
           if [ ! -f "${PREVIOUS_FILE}" ]; then
@@ -104,22 +119,60 @@ runs:
             echo "APP_VERSION=${prev}" >> "${ENV_FILE}"
           fi
           cd "${DEPLOY_PATH}"
-          APP_VERSION="${prev}" docker compose -f docker-compose.prod.yml pull ml
-          APP_VERSION="${prev}" docker compose -f docker-compose.prod.yml up -d ml
+          APP_VERSION="${prev}" compose pull ml
+          APP_VERSION="${prev}" compose up -d --force-recreate ml
         }
 
+        dump_diagnostics() {
+          echo "===== docker ps =====" >&2
+          docker ps -a --filter name=skinemsya-ml >&2 || true
+          echo "===== docker logs (tail 200) =====" >&2
+          docker logs --tail 200 skinemsya-ml >&2 || true
+          echo "===== docker inspect (OOM/State) =====" >&2
+          docker inspect skinemsya-ml --format \
+            'Status={{.State.Status}} ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Error={{.State.Error}}' \
+            >&2 || true
+          echo "===== free -h =====" >&2
+          free -h >&2 || true
+        }
+
+        # 1) Процесс должен начать слушать порт (секунды).
         ok=0
-        for i in $(seq 1 36); do
+        for i in $(seq 1 24); do
           if curl -fsS "${HEALTH_URL}" >/dev/null 2>&1; then
             ok=1
             break
           fi
-          echo "Health check attempt ${i}/36..."
+          echo "Liveness attempt ${i}/24..."
+          sleep 5
+        done
+        if [ "${ok}" -ne 1 ]; then
+          echo "Liveness (/healthz) failed for version ${APP_VERSION}" >&2
+          dump_diagnostics
+          rollback || true
+          exit 1
+        fi
+        echo "Liveness OK — waiting for OCR readiness..."
+
+        # 2) OCR прогрев на слабом CPU может занять несколько минут.
+        ok=0
+        for i in $(seq 1 60); do
+          if curl -fsS "${READY_URL}" >/dev/null 2>&1; then
+            ok=1
+            break
+          fi
+          echo "Readiness attempt ${i}/60..."
+          # Если контейнер умер (OOM) — нет смысла ждать дальше.
+          if ! docker ps --filter name=skinemsya-ml --filter status=running -q | grep -q .; then
+            echo "Container is not running." >&2
+            break
+          fi
           sleep 5
         done
 
         if [ "${ok}" -ne 1 ]; then
-          echo "Health check failed for version ${APP_VERSION}" >&2
+          echo "Readiness (/readyz) failed for version ${APP_VERSION}" >&2
+          dump_diagnostics
           rollback || true
           exit 1
         fi

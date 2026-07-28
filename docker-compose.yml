@@ -23,7 +23,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: 950M
     # Для общей сети с беком (docker-compose бека должен объявлять эту сеть):
     # networks:
     #   - skinemsya

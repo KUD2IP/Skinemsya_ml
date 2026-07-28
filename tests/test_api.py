@@ -27,6 +27,13 @@ def test_healthz(client):
     assert response.json() == {"status": "ok"}
 
 
+def test_readyz(client):
+    # После lifespan OCR должен быть готов (или ещё loading на очень медленной машине).
+    response = client.get("/readyz")
+    assert response.status_code in (200, 503)
+    assert response.json()["status"] in ("ok", "loading", "error")
+
+
 def test_recognize_precheck_fixture(client):
     with open("tests/fixtures/simple_precheck.png", "rb") as f:
         response = client.post(
