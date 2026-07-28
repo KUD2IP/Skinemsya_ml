@@ -49,7 +49,9 @@ hotfix/*  ──PR──► master (+ develop)
 
 1. `docker login ghcr.io` под пользователем с `read:packages`.
 2. Каталог `/opt/skinemsya/deploy/ml` (создаст CI).
-3. В `PRODUCTION_ENV` **бека** указать:
+3. На диске держи запас **≥2 ГиБ** свободно: образ ML тяжёлый, CI перед деплоем делает `docker image/builder prune`, но при полностью забитом корне rsync `.env` падает с `No space left on device`.
+4. Swap 1–2 ГБ на 1 ГБ RAM-машине.
+5. В `PRODUCTION_ENV` **бека** указать:
 
 ```bash
 ML_SERVICE_URL=http://172.17.0.1:8001
@@ -57,14 +59,25 @@ ML_SERVICE_URL=http://172.17.0.1:8001
 
 ML слушает только `127.0.0.1:8001` на хосте.
 
+### Если диск забит прямо сейчас
+
+```bash
+df -h /
+docker system df
+docker system prune -af
+docker builder prune -af
+sudo journalctl --vacuum-size=50M
+sudo apt-get clean
+df -h /
+```
+
 ## Деплой
 
 1. CI пишет `deploy/.env` из секрета + `APP_VERSION` / `GHCR_OWNER`.
-2. `rsync` → `/opt/skinemsya/deploy/ml/`.
+2. На VPS — prune неиспользуемых Docker-слоёв, проверка свободного места, затем `rsync` → `/opt/skinemsya/deploy/ml/`.
 3. `docker compose pull ml && up -d ml`.
 4. Liveness: `curl http://127.0.0.1:8001/healthz` (сразу после старта uvicorn).
    Readiness: `curl http://127.0.0.1:8001/readyz` (после прогрева OCR, до ~5 мин на слабом CPU).
-   На 1 ГБ VPS желателен swap 1–2 ГБ — иначе возможен OOM при загрузке ONNX.
 5. При фейле — откат на `.previous-version`.
 
 ## Локальная проверка образа

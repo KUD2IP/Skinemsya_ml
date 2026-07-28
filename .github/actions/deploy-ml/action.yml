@@ -46,7 +46,7 @@ runs:
         private_key: ${{ inputs.ssh_private_key }}
         known_hosts: ${{ inputs.ssh_known_hosts }}
 
-    - name: Remember previous version and sync deploy files
+    - name: Free disk, remember previous version, sync deploy files
       shell: bash
       env:
         PRODUCTION_HOST: ${{ inputs.production_host }}
@@ -60,6 +60,40 @@ runs:
           "DEPLOY_PATH=${DEPLOY_PATH} APP_VERSION=${APP_VERSION}" bash -s <<'EOSSH'
         set -euo pipefail
         mkdir -p "${DEPLOY_PATH}"
+
+        echo "===== Disk before cleanup ====="
+        df -h /
+        docker system df || true
+
+        # Старые слои ML/бека быстро забивают маленький VPS.
+        docker container prune -f || true
+        docker image prune -af || true
+        docker builder prune -af || true
+        docker network prune -f || true
+        # Логи контейнера ML (json-file) тоже могут съесть диск.
+        if docker inspect skinemsya-ml >/dev/null 2>&1; then
+          log_path="$(docker inspect --format='{{.LogPath}}' skinemsya-ml 2>/dev/null || true)"
+          if [ -n "${log_path}" ] && [ -f "${log_path}" ]; then
+            sudo truncate -s 0 "${log_path}" 2>/dev/null || truncate -s 0 "${log_path}" 2>/dev/null || true
+          fi
+        fi
+        sudo journalctl --vacuum-size=50M >/dev/null 2>&1 || true
+        sudo apt-get clean >/dev/null 2>&1 || true
+
+        echo "===== Disk after cleanup ====="
+        df -h /
+        docker system df || true
+
+        # rsync .env + pull образа (~1–2 ГиБ слоёв) — без запаса ENOSPC неизбежен.
+        avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+        if [ "${avail_kb}" -lt 1572864 ]; then
+          echo "ERROR: need at least ~1.5GiB free on / before deploy (have $((avail_kb/1024))MiB)." >&2
+          echo "SSH to VPS and free space (docker images, logs, apt cache), then re-run." >&2
+          df -h >&2
+          docker system df -v >&2 || true
+          exit 1
+        fi
+
         PREVIOUS_FILE="${DEPLOY_PATH}/.previous-version"
         ENV_FILE="${DEPLOY_PATH}/.env"
         current_version=""
@@ -105,6 +139,8 @@ runs:
         }
         APP_VERSION="${APP_VERSION}" compose pull ml
         APP_VERSION="${APP_VERSION}" compose up -d --force-recreate ml
+        # Сразу после recreate убираем висящие слои от предыдущего тега.
+        docker image prune -af || true
 
         rollback() {
           if [ ! -f "${PREVIOUS_FILE}" ]; then
