@@ -1,0 +1,85 @@
+name: Docker build and push
+description: Build ML image and push to GHCR
+
+inputs:
+  version:
+    description: Semver application version
+    required: true
+  extra_tags:
+    description: Comma-separated extra Docker tags
+    required: false
+    default: ''
+  push:
+    description: Push image to GHCR
+    required: false
+    default: 'true'
+
+outputs:
+  image:
+    description: Full image reference with primary tag
+    value: ${{ steps.tags.outputs.primary }}
+  digest:
+    description: Image digest
+    value: ${{ steps.build.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build tag list
+      id: tags
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        EXTRA_TAGS: ${{ inputs.extra_tags }}
+      run: |
+        set -euo pipefail
+        OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+        IMAGE="ghcr.io/${OWNER}/skinemsya-ml"
+        TAG_LIST=()
+        TAG_LIST+=("${IMAGE}:${VERSION}")
+        if [ -n "${EXTRA_TAGS}" ]; then
+          IFS=',' read -ra EXTRAS <<< "${EXTRA_TAGS}"
+          for tag in "${EXTRAS[@]}"; do
+            tag="$(echo "$tag" | xargs)"
+            [ -n "$tag" ] && TAG_LIST+=("${IMAGE}:${tag}")
+          done
+        fi
+        printf -v JOINED '%s,' "${TAG_LIST[@]}"
+        echo "list=${JOINED%,}" >> "$GITHUB_OUTPUT"
+        echo "primary=${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GHCR
+      if: inputs.push == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+
+    - name: Build and push
+      id: build
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: ${{ inputs.push }}
+        tags: ${{ steps.tags.outputs.list }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Trivy scan
+      if: inputs.push == 'true'
+      uses: aquasecurity/trivy-action@v0.36.0
+      env:
+        TRIVY_USERNAME: ${{ github.actor }}
+        TRIVY_PASSWORD: ${{ github.token }}
+      with:
+        image-ref: ${{ steps.tags.outputs.primary }}
+        format: table
+        scanners: vuln
+        vuln-type: os
+        exit-code: '1'
+        severity: CRITICAL,HIGH
+        ignore-unfixed: true

@@ -1,0 +1,142 @@
+name: ML Production
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Override semver version (optional)
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-production-ml
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  resolve-version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      minor: ${{ steps.version.outputs.minor }}
+      sha_tag: ${{ steps.version.outputs.sha_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Determine version
+        id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="${INPUT_VERSION}"
+          else
+            version="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+            latest_tag="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1 || true)"
+            if [ -n "${latest_tag}" ]; then
+              tag_version="${latest_tag#v}"
+              tag_version="${tag_version%-rc}"
+              if [[ "${tag_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+                version="${tag_version}"
+              fi
+            fi
+          fi
+          if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "Unable to resolve semver version: ${version}" >&2
+            exit 1
+          fi
+          minor="${version%.*}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "minor=${minor}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Python verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/python-verify
+        with:
+          run_ocr_tests: 'true'
+
+  build:
+    name: Build and push production image
+    needs: [resolve-version, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and push
+        id: build
+        uses: ./.github/actions/docker-build-push
+        with:
+          version: ${{ needs.resolve-version.outputs.version }}
+          extra_tags: ${{ needs.resolve-version.outputs.minor }},${{ needs.resolve-version.outputs.sha_tag }},production
+          push: 'true'
+
+  deploy:
+    name: Deploy production
+    needs: [resolve-version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment:
+      name: production
+      url: https://skinemsya-vse.ru
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/deploy-ml
+        with:
+          version: ${{ needs.resolve-version.outputs.version }}
+          production_env: ${{ secrets.PRODUCTION_ENV }}
+          ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          production_host: ${{ secrets.PRODUCTION_HOST }}
+          production_user: ${{ secrets.PRODUCTION_USER }}
+          production_ssh_port: ${{ secrets.PRODUCTION_SSH_PORT || '22' }}
+          ssh_known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [resolve-version, build, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create tag and release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.resolve-version.outputs.version }}
+          name: v${{ needs.resolve-version.outputs.version }}
+          generate_release_notes: true
+          make_latest: true
+          body: |
+            Production ML release **v${{ needs.resolve-version.outputs.version }}**.
+
+            Docker image: `${{ needs.build.outputs.image }}`
+            Digest: `${{ needs.build.outputs.digest }}`
+
+            Tags: `${{ needs.resolve-version.outputs.version }}`, `${{ needs.resolve-version.outputs.minor }}`, `production`, `${{ needs.resolve-version.outputs.sha_tag }}`
+
+            Deploy path: `/opt/skinemsya/deploy/ml/`
+            Health: `http://127.0.0.1:8001/healthz` (на VPS)

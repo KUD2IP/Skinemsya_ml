@@ -1,0 +1,37 @@
+# Production ML stack (тот же VPS, что и бек).
+# deploy/.env создаётся GitHub Actions из environment secret PRODUCTION_ENV.
+#
+# Бек должен знать адрес сервиса, например в его PRODUCTION_ENV:
+#   ML_SERVICE_URL=http://172.17.0.1:8001
+# или (если бек в docker compose с extra_hosts host.docker.internal):
+#   ML_SERVICE_URL=http://host.docker.internal:8001
+#
+# Порт 8001 только на localhost — снаружи не торчит.
+
+name: skinemsya-ml
+
+services:
+  ml:
+    image: ghcr.io/${GHCR_OWNER}/skinemsya-ml:${APP_VERSION:?set APP_VERSION}
+    pull_policy: always
+    container_name: skinemsya-ml
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:8001:8000'
+    environment:
+      ML_OCR_THREADS: ${ML_OCR_THREADS:-1}
+      # Опционально: дообученная модель (смонтировать volume и раскомментировать)
+      # ML_REC_MODEL_PATH: /custom/receipt_rec.onnx
+      # ML_REC_KEYS_PATH: /custom/receipt_keys.txt
+    # volumes:
+    #   - ./models:/custom:ro
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:8000/healthz']
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 768M

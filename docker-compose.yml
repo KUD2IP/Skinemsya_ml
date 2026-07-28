@@ -1,0 +1,32 @@
+# ML-сервис распознавания чеков.
+#
+# Локальная проверка вместе с беком:
+#   1. docker compose up -d --build          (в этом репозитории)
+#   2. В Skinemsya задать ML_SERVICE_URL=http://host.docker.internal:8100
+#      (или http://ml:8000, если сервисы в общей docker-сети, см. ниже)
+#   3. Загрузить фото чека через фронт — позиции появятся в событии.
+services:
+  ml:
+    build: .
+    container_name: skinemsya-ml
+    restart: unless-stopped
+    ports:
+      - "8100:8000"
+    environment:
+      # На 1 vCPU дополнительные потоки ORT только замедляют.
+      ML_OCR_THREADS: "1"
+      # Чтобы подключить дообученную модель — раскомментировать и смонтировать volume:
+      # ML_REC_MODEL_PATH: /custom/receipt_rec.onnx
+      # ML_REC_KEYS_PATH: /custom/receipt_keys.txt
+    # volumes:
+    #   - ./data/models:/custom:ro
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    # Для общей сети с беком (docker-compose бека должен объявлять эту сеть):
+    # networks:
+    #   - skinemsya
+# networks:
+#   skinemsya:
+#     external: true

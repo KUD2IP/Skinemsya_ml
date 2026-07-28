@@ -1,0 +1,58 @@
+name: Python verify
+description: Install deps, run unit tests, optionally OCR/API tests
+
+inputs:
+  python_version:
+    description: Python version
+    required: false
+    default: '3.11'
+  run_ocr_tests:
+    description: Download OCR models and run API tests
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+        cache: pip
+        cache-dependency-path: pyproject.toml
+
+    - name: Install package with dev deps
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+        # rapidocr тянет полный opencv; в CI GUI не нужен.
+        pip uninstall -y opencv-python opencv-contrib-python || true
+        pip install --force-reinstall "opencv-python-headless>=4.10"
+
+    - name: Parser unit tests
+      shell: bash
+      run: pytest -q tests/test_parser.py
+
+    - name: Cache OCR models
+      if: inputs.run_ocr_tests == 'true'
+      uses: actions/cache@v4
+      with:
+        path: .models
+        key: rapidocr-ppocrv5-${{ runner.os }}-v1
+
+    - name: Download OCR models
+      if: inputs.run_ocr_tests == 'true'
+      shell: bash
+      env:
+        ML_MODEL_ROOT_DIR: ${{ github.workspace }}/.models
+      run: python scripts/download_models.py
+
+    - name: API / OCR tests
+      if: inputs.run_ocr_tests == 'true'
+      shell: bash
+      env:
+        ML_MODEL_ROOT_DIR: ${{ github.workspace }}/.models
+        ML_OCR_THREADS: '2'
+      run: pytest -q tests/test_api.py

@@ -1,0 +1,129 @@
+name: Deploy ML to production
+description: Sync deploy files, pull image, health check with rollback
+
+inputs:
+  version:
+    description: Semver version to deploy
+    required: true
+  production_env:
+    description: Multiline production .env contents
+    required: true
+  ssh_private_key:
+    description: SSH private key
+    required: true
+  production_host:
+    description: Production VPS host
+    required: true
+  production_user:
+    description: SSH user
+    required: true
+  production_ssh_port:
+    description: SSH port
+    required: false
+    default: '22'
+  ssh_known_hosts:
+    description: Optional known_hosts entries
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare deploy .env
+      uses: ./.github/actions/prepare-deploy-env
+      with:
+        env_secret: ${{ inputs.production_env }}
+        app_version: ${{ inputs.version }}
+        ghcr_owner: ${{ github.repository_owner }}
+
+    - name: Setup SSH
+      id: ssh
+      uses: ./.github/actions/setup-ssh
+      with:
+        host: ${{ inputs.production_host }}
+        user: ${{ inputs.production_user }}
+        port: ${{ inputs.production_ssh_port }}
+        private_key: ${{ inputs.ssh_private_key }}
+        known_hosts: ${{ inputs.ssh_known_hosts }}
+
+    - name: Sync deploy files
+      shell: bash
+      env:
+        PRODUCTION_HOST: ${{ inputs.production_host }}
+        PRODUCTION_USER: ${{ inputs.production_user }}
+        SSH_OPTS: ${{ steps.ssh.outputs.ssh_opts }}
+        DEPLOY_PATH: /opt/skinemsya/deploy/ml
+      run: |
+        set -euo pipefail
+        ssh $SSH_OPTS "${PRODUCTION_USER}@${PRODUCTION_HOST}" "mkdir -p ${DEPLOY_PATH}"
+        rsync -avz -e "ssh $SSH_OPTS" deploy/ "${PRODUCTION_USER}@${PRODUCTION_HOST}:${DEPLOY_PATH}/"
+
+    - name: Deploy with health check and rollback
+      shell: bash
+      env:
+        PRODUCTION_HOST: ${{ inputs.production_host }}
+        PRODUCTION_USER: ${{ inputs.production_user }}
+        SSH_OPTS: ${{ steps.ssh.outputs.ssh_opts }}
+        APP_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        ssh $SSH_OPTS "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
+          "APP_VERSION=${APP_VERSION}" bash -s <<'EOSSH'
+        set -euo pipefail
+        DEPLOY_PATH="/opt/skinemsya/deploy/ml"
+        ENV_FILE="${DEPLOY_PATH}/.env"
+        PREVIOUS_FILE="${DEPLOY_PATH}/.previous-version"
+        HEALTH_URL="http://127.0.0.1:8001/healthz"
+
+        chmod 600 "${ENV_FILE}"
+
+        current_version=""
+        if [ -f "${ENV_FILE}" ]; then
+          current_version="$(grep -E '^APP_VERSION=' "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)"
+        fi
+        if [ -n "${current_version}" ] && [ "${current_version}" != "${APP_VERSION}" ]; then
+          printf '%s\n' "${current_version}" > "${PREVIOUS_FILE}"
+          chmod 600 "${PREVIOUS_FILE}"
+        fi
+
+        cd "${DEPLOY_PATH}"
+        # Логин в GHCR нужен один раз на сервере (docker login ghcr.io).
+        APP_VERSION="${APP_VERSION}" docker compose -f docker-compose.prod.yml pull ml
+        APP_VERSION="${APP_VERSION}" docker compose -f docker-compose.prod.yml up -d ml
+
+        rollback() {
+          if [ ! -f "${PREVIOUS_FILE}" ]; then
+            echo "No previous version to rollback." >&2
+            return 1
+          fi
+          prev="$(cat "${PREVIOUS_FILE}")"
+          echo "Rolling back to ${prev}..."
+          if grep -q '^APP_VERSION=' "${ENV_FILE}"; then
+            sed -i "s/^APP_VERSION=.*/APP_VERSION=${prev}/" "${ENV_FILE}"
+          else
+            echo "APP_VERSION=${prev}" >> "${ENV_FILE}"
+          fi
+          cd "${DEPLOY_PATH}"
+          APP_VERSION="${prev}" docker compose -f docker-compose.prod.yml pull ml
+          APP_VERSION="${prev}" docker compose -f docker-compose.prod.yml up -d ml
+        }
+
+        ok=0
+        for i in $(seq 1 36); do
+          if curl -fsS "${HEALTH_URL}" >/dev/null 2>&1; then
+            ok=1
+            break
+          fi
+          echo "Health check attempt ${i}/36..."
+          sleep 5
+        done
+
+        if [ "${ok}" -ne 1 ]; then
+          echo "Health check failed for version ${APP_VERSION}" >&2
+          rollback || true
+          exit 1
+        fi
+
+        docker image prune -f
+        echo "Deployed ML version ${APP_VERSION} successfully."
+        EOSSH

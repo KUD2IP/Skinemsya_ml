@@ -1,0 +1,38 @@
+name: Prepare deploy .env
+description: Create deploy/.env from multiline secret and append runtime variables
+
+inputs:
+  env_secret:
+    description: Multiline production environment file contents
+    required: true
+  app_version:
+    description: Application semver version
+    required: true
+  ghcr_owner:
+    description: GHCR image owner (lowercase)
+    required: true
+  output_path:
+    description: Path to write .env file
+    required: false
+    default: deploy/.env
+
+runs:
+  using: composite
+  steps:
+    - name: Write deploy .env
+      shell: bash
+      env:
+        PRODUCTION_ENV: ${{ inputs.env_secret }}
+        APP_VERSION: ${{ inputs.app_version }}
+        GHCR_OWNER: ${{ inputs.ghcr_owner }}
+        OUTPUT_PATH: ${{ inputs.output_path }}
+      run: |
+        set -euo pipefail
+        umask 077
+        mkdir -p "$(dirname "$OUTPUT_PATH")"
+        printf '%s\n' "$PRODUCTION_ENV" > "$OUTPUT_PATH"
+        {
+          echo "APP_VERSION=${APP_VERSION}"
+          echo "GHCR_OWNER=${GHCR_OWNER,,}"
+        } >> "$OUTPUT_PATH"
+        chmod 600 "$OUTPUT_PATH"

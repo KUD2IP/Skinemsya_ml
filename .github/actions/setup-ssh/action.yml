@@ -1,0 +1,55 @@
+name: Setup SSH
+description: Configure SSH key and known_hosts for VPS deploy
+
+inputs:
+  host:
+    description: Remote host
+    required: true
+  user:
+    description: SSH user
+    required: true
+  port:
+    description: SSH port
+    required: false
+    default: '22'
+  private_key:
+    description: SSH private key
+    required: true
+  known_hosts:
+    description: Optional known_hosts entries
+    required: false
+    default: ''
+
+outputs:
+  ssh_opts:
+    description: SSH options string
+    value: ${{ steps.config.outputs.ssh_opts }}
+
+runs:
+  using: composite
+  steps:
+    - name: Configure SSH
+      id: config
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.private_key }}
+        SSH_HOST: ${{ inputs.host }}
+        SSH_PORT: ${{ inputs.port }}
+        SSH_KNOWN_HOSTS: ${{ inputs.known_hosts }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        if ! ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null 2>&1; then
+          echo "SSH private key is invalid." >&2
+          exit 1
+        fi
+        if [ -n "${SSH_KNOWN_HOSTS:-}" ]; then
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+        else
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+        fi
+        chmod 644 ~/.ssh/known_hosts
+        echo "ssh_opts=-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -p ${SSH_PORT}" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,35 @@
+[project]
+name = "skinemsya-ml"
+version = "0.1.0"
+description = "ML-сервис распознавания чеков для «Скинемся»: POST /api/v1/recognize -> JSON по контракту бека"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.7",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.10",
+    "rapidocr>=3.0",
+    "onnxruntime>=1.18",
+    "pillow>=10.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+train = [
+    "requests>=2.31",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*", "training*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

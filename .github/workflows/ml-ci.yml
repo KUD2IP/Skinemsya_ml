@@ -1,0 +1,25 @@
+name: ML CI
+
+on:
+  pull_request:
+    branches: [develop, master, 'release/**', 'hotfix/**']
+
+concurrency:
+  group: ml-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/python-verify
+        with:
+          run_ocr_tests: 'true'

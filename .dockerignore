@@ -1,0 +1,11 @@
+.venv
+.git
+.idea
+__pycache__
+*.pyc
+data/
+tests/
+training/
+docs/
+scripts/render_test_receipt.py
+README.md
