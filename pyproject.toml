@@ -8,7 +8,9 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
     "pydantic>=2.7",
-    "numpy>=1.26",
+    # NumPy 2.1+ Linux wheels требуют x86-64-v2 (SSE4.2).
+    # Дешёвые VPS часто на v1 — иначе RuntimeError при import numpy.
+    "numpy>=1.26,<2.1",
     "opencv-python-headless>=4.10",
     "rapidocr>=3.0",
     "onnxruntime>=1.18",

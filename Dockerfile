@@ -18,12 +18,11 @@ WORKDIR /srv
 COPY pyproject.toml ./
 COPY app ./app
 
-# Сначала headless OpenCV, затем пакет: так полный opencv-python
-# либо не ставится, либо сразу вычищается — меньше пик диска при сборке.
-RUN pip install --no-cache-dir "opencv-python-headless>=4.10" \
+# Сначала headless OpenCV + NumPy без x86-64-v2, затем пакет.
+RUN pip install --no-cache-dir "numpy>=1.26,<2.1" "opencv-python-headless>=4.10" \
     && pip install --no-cache-dir . \
     && pip uninstall -y opencv-python opencv-contrib-python || true \
-    && pip install --no-cache-dir --force-reinstall "opencv-python-headless>=4.10" \
+    && pip install --no-cache-dir --force-reinstall "numpy>=1.26,<2.1" "opencv-python-headless>=4.10" \
     && find /usr/local/lib -type d -name '__pycache__' -prune -exec rm -rf {} + \
     && rm -rf /tmp/* /root/.cache
 

@@ -51,7 +51,8 @@ hotfix/*  ──PR──► master (+ develop)
 2. Каталог `/opt/skinemsya/deploy/ml` (создаст CI).
 3. На диске держи запас **≥2 ГиБ** свободно: образ ML тяжёлый, CI перед деплоем делает `docker image/builder prune`, но при полностью забитом корне rsync `.env` падает с `No space left on device`.
 4. Swap 1–2 ГБ на 1 ГБ RAM-машине.
-5. В `PRODUCTION_ENV` **бека** указать:
+5. CPU должен быть не экзотически старым, но **x86-64-v2 не обязателен**: в образе NumPy зафиксирован `<2.1` (иначе на v1-only VPS падает `NumPy was built with baseline optimizations: X86_V2`).
+6. В `PRODUCTION_ENV` **бека** указать:
 
 ```bash
 ML_SERVICE_URL=http://172.17.0.1:8001
