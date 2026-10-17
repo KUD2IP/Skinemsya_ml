@@ -106,7 +106,7 @@ class TestReceiptParsing:
         assert len(response.items) == 1
         assert response.items[0].name == "Латте"
 
-    def test_total_mismatch_nulls_total(self):
+    def test_total_mismatch_keeps_printed_total(self):
         response = parse_receipt(
             make_tokens(
                 [
@@ -115,8 +115,9 @@ class TestReceiptParsing:
                 ]
             )
         )
-        # Итог не бьётся: total обнуляем, чтобы бек не завалил чек, и добавляем ошибку.
-        assert response.total is None
+        # Итог не бьётся с позициями (скидки и т.п.): оставляем печатный ИТОГО,
+        # помечаем mismatch — бек видит сумму к оплате и флаг.
+        assert response.total == 999.0
         assert "total_mismatch" in response.errors
         assert len(response.items) == 1
 
@@ -197,7 +198,7 @@ class TestReceiptParsing:
         )
         assert len(response.items) == 1
         assert response.items[0].total_price == 750.0
-        assert response.total is None  # 750 != 562 из-за скидки
+        assert response.total == 562.0  # печатный итог после скидки
         assert "total_mismatch" in response.errors
 
     def test_qty_not_glued_to_price(self):
@@ -219,6 +220,104 @@ class TestReceiptParsing:
             (2.0, 1358.0),
         ]
         assert response.total == 2433.0
+        assert response.errors == []
+
+    def test_weight_fractional_qty(self):
+        """Ритейл CDEK: весовой товар 0.448 кг × цена = сумма."""
+        response = parse_receipt(
+            make_tokens(
+                [
+                    "Наименование Кол-во Сумма",
+                    "БАНАНЫ 1КГ 0.448 129.88",
+                    "ИТОГО: 129.88",
+                ]
+            )
+        )
+        assert len(response.items) == 1
+        assert abs(response.items[0].quantity - 0.448) < 0.001
+        assert abs(response.items[0].total_price - 129.88) < 0.01
+
+    def test_retail_unit_before_quantity(self):
+        response = parse_receipt(
+            make_tokens(
+                [
+                    "ПИВО КРОМБАХЕР ПИЛС 0,5 ЖБ 179.99 *1 =179.99",
+                    "ПИВО ШПАТЕН МЮНХЕН 134.99 2 =269.98",
+                    "ИТОГ =449.97",
+                ]
+            )
+        )
+        assert [(item.quantity, item.unit_price, item.total_price) for item in response.items] == [
+            (1.0, 179.99, 179.99),
+            (2.0, 134.99, 269.98),
+        ]
+        assert response.total == 449.97
+        assert response.errors == []
+
+    def test_retail_name_then_tax_detail(self):
+        response = parse_receipt(
+            make_tokens(
+                [
+                    "МАГНОЛИЯ",
+                    "СИДР ДАБЛ ТРИ ЯБЛОКО П/СУХ. 0.45",
+                    "22.0 НДС2 119.99 *1 =119.99",
+                    "ЧИПСЫ ЛЕЙЗ ПАПРИКА 225Г",
+                    "22.0 НДС2 269.99 *1 =269.99",
+                    "ИТОГ =389.98",
+                ]
+            )
+        )
+        assert len(response.items) == 2
+        assert response.items[0].name.endswith("0.45")
+        assert response.items[0].quantity == 1.0
+        assert response.items[0].total_price == 119.99
+        assert response.items[1].total_price == 269.99
+        assert response.total == 389.98
+
+    def test_discount_on_same_line_is_not_total(self):
+        response = parse_receipt(
+            make_tokens(
+                [
+                    "Гренки 99.99 *1 =99.99",
+                    "Пиво 179.99 *1 =179.99",
+                    "ИТОГО БЕЗ СКИДКИ =300.00 СКИДКА =20.02",
+                    "НТОГ =279.98",
+                    "БЕЗНАЛИЧНЫМИ =279.98",
+                ]
+            )
+        )
+        assert response.total == 279.98
+        assert response.errors == []
+
+    def test_vat_amount_is_not_total(self):
+        response = parse_receipt(
+            make_tokens(
+                [
+                    "Товар 500.00",
+                    "СУММА(РУБ): 500.00",
+                    "СУММА НДС 22% =90.16",
+                ]
+            )
+        )
+        assert response.total == 500.0
+
+    def test_quantity_detail_on_following_line(self):
+        response = parse_receipt(
+            make_tokens(
+                [
+                    "ПИЛСНЕР 400 МЛ РОЗЛИВ =3440.00",
+                    "3.2 ШТ. × 1075.00",
+                    "БАРСУК МЕЛОМЕЛЬ ЕЖЕВИКА 0.5",
+                    "1 ШТ. × 660.00",
+                    "ИТОГ =4100.00",
+                ]
+            )
+        )
+        assert [(item.quantity, item.unit_price, item.total_price) for item in response.items] == [
+            (3.2, 1075.0, 3440.0),
+            (1.0, 660.0, 660.0),
+        ]
+        assert response.total == 4100.0
         assert response.errors == []
 
 

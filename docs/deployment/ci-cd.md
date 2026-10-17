@@ -52,13 +52,20 @@ hotfix/*  ──PR──► master (+ develop)
 3. На диске держи запас **≥2 ГиБ** свободно: образ ML тяжёлый, CI перед деплоем делает `docker image/builder prune`, но при полностью забитом корне rsync `.env` падает с `No space left on device`.
 4. Swap 1–2 ГБ на 1 ГБ RAM-машине.
 5. CPU должен быть не экзотически старым, но **x86-64-v2 не обязателен**: в образе NumPy зафиксирован `<2.1` (иначе на v1-only VPS падает `NumPy was built with baseline optimizations: X86_V2`).
-6. В `PRODUCTION_ENV` **бека** указать:
+6. В `PRODUCTION_ENV` **бека** указать (имя контейнера ML в общей сети бека):
 
 ```bash
-ML_SERVICE_URL=http://172.17.0.1:8001
+ML_SERVICE_URL=http://skinemsya-ml:8000
 ```
 
-ML слушает только `127.0.0.1:8001` на хосте.
+Не ставь `http://172.17.0.1:8001`: порт ML опубликован как `127.0.0.1:8001`, и из контейнера бека до него так не достучаться. ML compose подключает сервис к внешней сети `skinemsya_default`.
+
+Проверка с VPS:
+
+```bash
+docker exec skinemsya-backend-1 curl -fsS http://skinemsya-ml:8000/healthz
+docker exec skinemsya-backend-1 printenv ML_SERVICE_URL
+```
 
 ### Если диск забит прямо сейчас
 

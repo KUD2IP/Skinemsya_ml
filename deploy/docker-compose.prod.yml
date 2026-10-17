@@ -1,12 +1,14 @@
 # Production ML stack (тот же VPS, что и бек).
 # deploy/.env создаётся GitHub Actions из environment secret PRODUCTION_ENV.
 #
-# Бек должен знать адрес сервиса, например в его PRODUCTION_ENV:
-#   ML_SERVICE_URL=http://172.17.0.1:8001
-# или (если бек в docker compose с extra_hosts host.docker.internal):
-#   ML_SERVICE_URL=http://host.docker.internal:8001
+# Бек и ML в одной docker-сети `skinemsya_default` (проект бека `name: skinemsya`).
+# В PRODUCTION_ENV бека:
+#   ML_SERVICE_URL=http://skinemsya-ml:8000
 #
-# Порт 8001 только на localhost — снаружи не торчит.
+# НЕ используй http://172.17.0.1:8001 при публикации 127.0.0.1:8001 —
+# с контейнера бека до localhost-биндинга хоста трафик не доходит.
+#
+# Порт 8001 на localhost — только для healthcheck деплоя с хоста / отладки.
 
 name: skinemsya-ml
 
@@ -18,6 +20,9 @@ services:
     restart: unless-stopped
     ports:
       - '127.0.0.1:8001:8000'
+    networks:
+      - default
+      - skinemsya
     environment:
       ML_OCR_THREADS: ${ML_OCR_THREADS:-1}
       OMP_NUM_THREADS: "1"
@@ -40,3 +45,8 @@ services:
       resources:
         limits:
           memory: 950M
+
+networks:
+  skinemsya:
+    external: true
+    name: skinemsya_default

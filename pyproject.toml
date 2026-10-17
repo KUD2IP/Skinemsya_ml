@@ -24,6 +24,9 @@ dev = [
 ]
 train = [
     "requests>=2.31",
+    "datasets>=2.19",
+    "huggingface_hub>=0.23",
+    "tqdm>=4.66",
 ]
 
 [build-system]

@@ -219,9 +219,12 @@ __marimo__/
 
 # Skinemsya ML
 data/
+# в т.ч. data/cdek/, data/rec_mix/, data/synth/ — не коммитить (~ГБ картинок)
 .models/
 *.onnx
 training/output/
 deploy/.env
 deploy/.previous-version
 
+
+training/colab/PaddleOCR/

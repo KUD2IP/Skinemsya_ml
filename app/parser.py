@@ -27,7 +27,10 @@ from app.schemas import ReceiptItem, ReceiptResponse
 # Строка с итоговой суммой чека. Порядок = приоритет.
 TOTAL_PATTERNS = [
     re.compile(r"\bк\s*оплате\b", re.IGNORECASE),
-    re.compile(r"\bитого?\b", re.IGNORECASE),
+    # OCR нередко читает первую «И» как «Н»: «НТОГ».
+    re.compile(r"\b[ин]того?\b", re.IGNORECASE),
+    re.compile(r"\bс[уы]м\w*\s+бе[з3]\s+н[дoо]с\b", re.IGNORECASE),
+    re.compile(r"\bсумм\w*\s*\(?\s*руб\b", re.IGNORECASE),
     re.compile(r"\bподытог\b", re.IGNORECASE),
     re.compile(r"\btotal\b", re.IGNORECASE),
     re.compile(r"\bвсего\b", re.IGNORECASE),
@@ -41,8 +44,11 @@ EXCLUDE_PATTERN = re.compile(
     r"сч[её]т\s*№?|квитанци|инн|кпп|огрн|ккт|фн\s*№?|фд\s*№?|фп\b|рн\s*ккт|зн\s*ккт|"
     r"налич|безнал|карт(ой|а)\b|оплат|сдача|получено|внесено|аванс|кредит|"
     r"скидка|наценка|ндс|налог|округление|"
-    r"спасибо|благодарим|ждем|ждём|добро\s*пожаловать|приходите|до\s*свидания|"
+    r"терминал|мерчант|mir\s*(debit)?|одобрено|биометри|баланс\s+балл|бонусн\w*\s+карт|"
+    r"спасибо|благодарим|ждем|ждём|добро\b|торгов\w*\s+объ?ь?ект|"
+    r"приходите|до\s*свидания|"
     r"подпись|дата\b|время|телефон|тел[.:]|адрес|www\.|http|@|"
+    r"\bг\.?\s*моск|\bд\.\s*\d|\bстр\.?\s*\d|\bпом(ещ)?\.?\s*\d|марьин\w*\s+рощ|"
     r"кассовый|фискальн|документ|операци|прода(жа|жи)|приход\b|отчет|отчёт|"
     r"смс|sms|qr|сайт\b|проверьте|ofd|офд|чаевые\s+или|наведите|scan\b|leave\s+a\s+tip)",
     re.IGNORECASE,
@@ -105,7 +111,8 @@ _DIGIT_FIXES = str.maketrans({"О": "0", "о": "0", "O": "0", "o": "0", "l": "1"
 NUMBER_RE = re.compile(r"\d{1,3}(?:[ \u00A0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?")
 
 # Простые числа без склейки "2 250.00" в 2250.00 — для колоночных форматов.
-SIMPLE_NUMBER_RE = re.compile(r"\d+(?:[.,]\d{1,2})?")
+# До 3 знаков после запятой: вес в ритейле (0.448 кг), не только деньги (0.00).
+SIMPLE_NUMBER_RE = re.compile(r"\d+(?:[.,]\d{1,3})?")
 
 # Количество и цена за единицу: "2 x 450.00", "2 х 450", "1.5*100"
 QTY_UNIT_RE = re.compile(
@@ -116,6 +123,19 @@ QTY_UNIT_RE = re.compile(
 QTY_UNIT_SIMPLE_RE = re.compile(
     r"(?P<qty>\d+(?:[.,]\d{1,3})?)\s*[xхX×*]\s*(?P<unit>\d+(?:[.,]\d{1,2})?)",
 )
+# Деталь позиции на следующей строке: «3.2 ШТ. × 1075.00».
+QTY_UNIT_LABEL_RE = re.compile(
+    r"(?P<qty>\d+(?:[.,]\d{1,3})?)\s*(?:ш?[тt]|ut)\.?\s*[xхX×*]\s*"
+    r"(?P<unit>\d+(?:[ \u00A0]\d{3})*(?:[.,]\d{1,2})?)",
+    re.IGNORECASE,
+)
+# Ритейл обычно печатает цену до количества: «99.99 *1 =99.99».
+UNIT_QTY_TOTAL_RE = re.compile(
+    r"(?P<unit>\d+(?:[.,]\d{1,2})?)\s*(?:[xхX×*#№]\s*)"
+    r"(?P<qty>\d+(?:[.,]\d{1,3})?)\s*=?\s*"
+    r"(?P<total>\d+(?:[.,]\d{1,2})?)",
+)
+RETAIL_DETAIL_RE = re.compile(r"(?:н|h|n)[дaа][сcзz2]\w*", re.IGNORECASE)
 
 # Токен, состоящий только из чисел/разделителей — числовая колонка чека.
 NUMERIC_TOKEN_RE = re.compile(r"[\d\s.,:;%#№*=+xхX×\-−–—]+")
@@ -126,6 +146,8 @@ MAX_REASONABLE_QTY = 999
 # Количество больше — почти наверняка вес в граммах; для дележа счёта
 # трактуем такую позицию как «1 порция за total».
 MAX_COLUMN_QTY = 99
+# Весовой товар в ритейле: «0.448 × 289.90 = 129.88».
+MAX_WEIGHT_QTY = 50.0
 
 
 def _parse_number(raw: str) -> float | None:
@@ -413,6 +435,80 @@ def _is_total_line(text: str) -> bool:
     return any(p.search(text) for p in TOTAL_PATTERNS)
 
 
+def _total_from_line(text: str) -> tuple[int, float | None] | None:
+    """Возвращает приоритет метки и первое денежное число после неё.
+
+    Первое, а не последнее: в строке «ИТОГО БЕЗ СКИДКИ 1551 СКИДКА 161»
+    последнее число — скидка, а не итог.
+    """
+    normalized = _normalize_keywords(text)
+    for priority, pattern in enumerate(TOTAL_PATTERNS):
+        match = pattern.search(normalized)
+        if not match:
+            continue
+        # Обычная «сумма НДС» не является итогом. «Сумма без НДС» уже
+        # поймана более приоритетным специализированным шаблоном.
+        if priority == len(TOTAL_PATTERNS) - 1 and re.search(
+            r"(ндс|налог|комисси|скидк)", normalized
+        ):
+            return None
+        numbers = _extract_numbers(TIME_PATTERN.sub(" ", text[match.end():]))
+        amount = next(
+            (value for value in numbers if 0 < value <= MAX_REASONABLE_PRICE),
+            None,
+        )
+        # «Итого без скидки» полезно как запасной кандидат, но обычный
+        # «ИТОГ» или «К ОПЛАТЕ» должен побеждать.
+        if priority == 1 and re.search(r"без\s+скидк", normalized[match.end():]):
+            priority += 5
+        return priority, amount
+    return None
+
+
+def _nearby_total_amount(
+    entries: list[_Entry], index: int, median_height: float
+) -> float | None:
+    """Ищет сумму в соседнем OCR-боксе, в том числе слева/выше метки."""
+    candidates: list[tuple[float, float]] = []
+    current = entries[index]
+    for other_index in range(max(0, index - 2), min(len(entries), index + 3)):
+        if other_index == index:
+            continue
+        other = entries[other_index]
+        distance = abs(other.y - current.y)
+        if distance > 1.8 * median_height:
+            continue
+        numbers = _extract_numbers(TIME_PATTERN.sub(" ", other.text))
+        amounts = [value for value in numbers if 0 < value <= MAX_REASONABLE_PRICE]
+        if amounts:
+            candidates.append((distance, amounts[-1]))
+    return min(candidates, default=(0.0, None), key=lambda pair: pair[0])[1]
+
+
+def _select_total_candidate(
+    candidates: list[tuple[int, float]], entries: list[_Entry]
+) -> float | None:
+    """Выбирает итог с учётом повторов одной суммы в нижней части чека."""
+    if not candidates:
+        return None
+    all_amounts = [
+        value
+        for entry in entries
+        for value in _extract_numbers(TIME_PATTERN.sub(" ", entry.text))
+        if 0 < value <= MAX_REASONABLE_PRICE
+    ]
+
+    def rank(candidate: tuple[int, float]) -> tuple[int, int, int]:
+        priority, amount = candidate
+        repeats = sum(abs(value - amount) < 0.01 for value in all_amounts)
+        # Дублированная сумма («ИТОГ», «БЕЗНАЛИЧНЫМИ», банковский слип)
+        # надёжнее единичного ошибочного чтения жирного шрифта.
+        duplicate_boost = 2 if repeats >= 2 else 0
+        return priority - duplicate_boost, priority, -repeats
+
+    return min(candidates, key=rank)[1]
+
+
 def _is_excluded(text: str) -> bool:
     return bool(EXCLUDE_PATTERN.search(text))
 
@@ -468,7 +564,7 @@ def _parse_qty_pattern(text: str) -> tuple[re.Match, float, float, float, bool] 
     """Разбирает "qty x unit ... total", выбирая интерпретацию, где сходится
     арифметика (qty * unit == total). Возвращает (match, qty, unit, total, ok)."""
     best = None
-    for pattern in (QTY_UNIT_SIMPLE_RE, QTY_UNIT_RE):
+    for pattern in (QTY_UNIT_SIMPLE_RE, QTY_UNIT_RE, QTY_UNIT_LABEL_RE):
         match = pattern.search(text)
         if not match:
             continue
@@ -487,6 +583,46 @@ def _parse_qty_pattern(text: str) -> tuple[re.Match, float, float, float, bool] 
         if best is None:
             best = (match, quantity, unit_price, total_price, False)
     return best
+
+
+def _parse_unit_qty_total(text: str) -> tuple[float, float, float] | None:
+    """Разбирает ритейловый порядок «цена * количество = сумма»."""
+    match = UNIT_QTY_TOTAL_RE.search(_fix_digit_confusions(text))
+    if not match:
+        return None
+    unit = _parse_number(match.group("unit"))
+    quantity = _parse_number(match.group("qty"))
+    total = _parse_number(match.group("total"))
+    if unit is None or quantity is None or total is None or not _looks_like_qty(quantity):
+        return None
+    if abs(unit * quantity - total) > max(0.02 * total, 0.02):
+        return None
+    return quantity, unit, total
+
+
+def _parse_retail_detail(text: str) -> tuple[float, float, float] | None:
+    """Строка под названием товара: «22.0 НДС2 149.99 *1 =149.99».
+
+    Налоговая ставка не является количеством. Источник истины здесь —
+    маркер количества и сумма после знака равенства.
+    """
+    normalized = _normalize_keywords(text)
+    if not RETAIL_DETAIL_RE.search(normalized):
+        return None
+    equals = re.findall(r"=\s*(\d+(?:[.,]\d{1,2})?)", _fix_digit_confusions(text))
+    if not equals:
+        return None
+    total = _parse_number(equals[-1])
+    if total is None or total <= 0 or total > MAX_REASONABLE_PRICE:
+        return None
+    quantity_match = re.search(
+        r"(?:[*#№xхX×]\s*)(\d+(?:[.,]\d{1,3})?)\s*=",
+        _fix_digit_confusions(text),
+    )
+    quantity = _parse_number(quantity_match.group(1)) if quantity_match else 1.0
+    if quantity is None or not _looks_like_qty(quantity):
+        quantity = 1.0
+    return float(quantity), round(total / quantity, 2), float(total)
 
 
 def _parse_token_amount(text: str) -> float | None:
@@ -524,6 +660,16 @@ def _parse_token_amount(text: str) -> float | None:
     return total
 
 
+def _looks_like_qty(value: float) -> bool:
+    """Целое количество (1..99) или вес/дробь (0.001..50), типичные для чеков."""
+    if value <= 0:
+        return False
+    if value == int(value) and value <= MAX_COLUMN_QTY:
+        return True
+    # Вес в кг / доля упаковки (ритейл CDEK: 0.448, 0.936, …).
+    return value < MAX_WEIGHT_QTY and abs(value - round(value)) > 1e-6
+
+
 def _qty_total_from_group(group: _Row) -> tuple[float | None, float | None]:
     """Колонки «Кол-во | Сумма» по отдельным боксам — без склейки «4»+«780»→4780."""
     amounts: list[float] = []
@@ -538,11 +684,11 @@ def _qty_total_from_group(group: _Row) -> tuple[float | None, float | None]:
     total = amounts[-1]
     quantity = amounts[0]
     # qty | unit | total — берём крайние, если среднее похоже на цену за единицу.
-    if len(amounts) >= 3 and 0 < amounts[0] <= MAX_COLUMN_QTY:
+    if len(amounts) >= 3 and _looks_like_qty(amounts[0]):
         q, unit, tot = amounts[0], amounts[1], amounts[-1]
         if abs(q * unit - tot) <= max(0.02 * tot, 1.0):
             return q, tot
-    if 0 < quantity <= MAX_COLUMN_QTY and quantity == int(quantity):
+    if _looks_like_qty(quantity):
         return float(quantity), float(total)
     return None, float(total)
 
@@ -563,7 +709,7 @@ def _parse_qty_sum_from_text(price_part: str) -> tuple[float | None, float] | No
 
     last_raw = parts[-1].group()
     total = _parse_number(last_raw)
-    if total is None or total < 0:
+    if total is None or total <= 0:
         return None
     if not has_decimals(last_raw) and total < 10 and len(parts) < 2:
         return None
@@ -572,13 +718,12 @@ def _parse_qty_sum_from_text(price_part: str) -> tuple[float | None, float] | No
     if len(parts) >= 2:
         raw = parts[-2].group()
         val = _parse_number(raw)
-        if (
-            val is not None
-            and not has_decimals(raw)
-            and 0 < val <= MAX_COLUMN_QTY
-            and val == int(val)
-        ):
-            quantity = float(val)
+        if val is not None and _looks_like_qty(val):
+            # Целое без запятой — колонка «кол-во»; дробь — вес (0,448).
+            if not has_decimals(raw) and val == int(val):
+                quantity = float(val)
+            elif has_decimals(raw):
+                quantity = float(val)
     return quantity, float(total)
 
 
@@ -589,6 +734,17 @@ def _try_parse_item(
     numeric_group: _Row | None = None,
 ) -> ParsedItem | None:
     """Пытается разобрать строку как позицию чека."""
+    unit_qty_total = _parse_unit_qty_total(text)
+    if unit_qty_total:
+        quantity, unit_price, total_price = unit_qty_total
+        marker = UNIT_QTY_TOTAL_RE.search(_fix_digit_confusions(text))
+        assert marker is not None
+        name = _clean_name(text[: marker.start()])
+        if name and _has_letters(name, minimum=3):
+            return ParsedItem(
+                name, quantity, unit_price, total_price, score, arithmetic_ok=True
+            )
+
     parsed_qty = _parse_qty_pattern(text)
     if parsed_qty:
         qty_match, quantity, unit_price, total_price, arithmetic_ok = parsed_qty
@@ -613,7 +769,7 @@ def _try_parse_item(
     if qty_sum_layout and numeric_group is not None:
         quantity, total_price = _qty_total_from_group(numeric_group)
         if total_price is not None and total_price > 0 and _plausible(quantity or 1.0, total_price):
-            if quantity is not None and quantity <= MAX_COLUMN_QTY:
+            if quantity is not None and _looks_like_qty(quantity):
                 unit_price = round(total_price / quantity, 2)
                 return ParsedItem(name, quantity, unit_price, total_price, score)
             return ParsedItem(name, 1.0, None, total_price, score)
@@ -643,7 +799,18 @@ def _try_parse_item(
         quantity, unit_price, total_price = simple_numbers[-3], simple_numbers[-2], simple_numbers[-1]
         if (
             _plausible(quantity, total_price)
-            and quantity <= MAX_REASONABLE_QTY
+            and _looks_like_qty(quantity)
+            and abs(quantity * unit_price - total_price) <= max(0.02 * total_price, 1.0)
+        ):
+            return ParsedItem(name, quantity, unit_price, total_price, score, arithmetic_ok=True)
+        unit_price, quantity, total_price = (
+            simple_numbers[-3],
+            simple_numbers[-2],
+            simple_numbers[-1],
+        )
+        if (
+            _plausible(quantity, total_price)
+            and _looks_like_qty(quantity)
             and abs(quantity * unit_price - total_price) <= max(0.02 * total_price, 1.0)
         ):
             return ParsedItem(name, quantity, unit_price, total_price, score, arithmetic_ok=True)
@@ -766,7 +933,7 @@ def parse_receipt(tokens: list[OcrToken]) -> ReceiptResponse:
     last_item_y: float | None = None
     text_line_index = -1
 
-    for entry in entries:
+    for entry_index, entry in enumerate(entries):
         text = entry.text.strip()
         if not text:
             continue
@@ -785,25 +952,20 @@ def parse_receipt(tokens: list[OcrToken]) -> ReceiptResponse:
         if COURSE_ROW_RE.match(normalized):
             continue
 
-        if entry.row is not None and _is_total_line(normalized):
-            numbers = _extract_numbers(TIME_PATTERN.sub(" ", text))
-            if numbers:
+        total_match = _total_from_line(text) if entry.row is not None else None
+        if total_match is not None:
+            priority, candidate = total_match
+            if candidate is None:
+                candidate = _nearby_total_amount(entries, entry_index, median_height)
+            if candidate is not None:
                 totals_seen = True
-                for priority, pattern in enumerate(TOTAL_PATTERNS):
-                    if pattern.search(normalized):
-                        candidate = numbers[-1]
-                        if 0 < candidate <= MAX_REASONABLE_PRICE:
-                            total_candidates.append((priority, candidate))
-                            if priority < total_priority:
-                                total = candidate
-                                total_priority = priority
-                        break
+                total_candidates.append((priority, candidate))
+                if priority < total_priority:
+                    total = candidate
+                    total_priority = priority
             else:
                 # Метка без числа: сумма могла уехать на отдельную строку.
-                for priority, pattern in enumerate(TOTAL_PATTERNS):
-                    if pattern.search(normalized):
-                        pending_total_priority = priority
-                        break
+                pending_total_priority = priority
             pending_name = None
             pending_numbers = None
             continue
@@ -821,12 +983,28 @@ def parse_receipt(tokens: list[OcrToken]) -> ReceiptResponse:
                 merchant = _clean_name(text) or None
             continue
 
+        if _extract_date(text) is not None and TIME_PATTERN.search(text):
+            pending_name = None
+            pending_numbers = None
+            continue
+
+        if (
+            re.match(r"^\s*\d{5,}", text)
+            and sum(ch.isalpha() for ch in text) < 8
+            and "=" not in text
+            and not re.search(r"[xхX×*]", text)
+        ):
+            pending_name = None
+            pending_numbers = None
+            continue
+
         cleaned = _strip_line_noise(text)
         if cleaned and cleaned != text:
             text = cleaned
             normalized = _normalize_keywords(text)
 
-        if _is_excluded(text):
+        retail_detail = _parse_retail_detail(text)
+        if _is_excluded(text) and retail_detail is None:
             pending_name = None
             # Отрицательные суммы скидок — не позиции.
             continue
@@ -875,6 +1053,91 @@ def parse_receipt(tokens: list[OcrToken]) -> ReceiptResponse:
 
         pending_total_priority = None
 
+        if retail_detail is not None:
+            if pending_name is not None:
+                quantity, unit_price, total_price = retail_detail
+                name, name_score = pending_name
+                items.append(
+                    ParsedItem(
+                        name,
+                        quantity,
+                        unit_price,
+                        total_price,
+                        (entry.score + name_score) / 2,
+                        arithmetic_ok=True,
+                    )
+                )
+                last_item_y = entry.y
+                if merchant == name:
+                    merchant = None
+            pending_name = None
+            pending_numbers = None
+            continue
+
+        # Название ритейлового товара может оканчиваться объёмом («0.45»).
+        # Если следующая строка явно содержит НДС/цену/количество, текущая
+        # строка целиком является названием, а не товаром ценой 0.45 руб.
+        next_is_retail_detail = (
+            entry_index + 1 < len(entries)
+            and _parse_retail_detail(entries[entry_index + 1].text) is not None
+        )
+        if next_is_retail_detail and _has_letters(text, minimum=3):
+            pending_name = (_clean_name(text), entry.score)
+            pending_numbers = None
+            continue
+
+        next_qty_detail = (
+            QTY_UNIT_LABEL_RE.search(_fix_digit_confusions(entries[entry_index + 1].text))
+            if entry_index + 1 < len(entries)
+            else None
+        )
+        if (
+            next_qty_detail is not None
+            and _has_letters(text, minimum=3)
+            and "=" not in text
+            and (_extract_numbers(text) or not items)
+        ):
+            pending_name = (_clean_name(text), entry.score)
+            pending_numbers = None
+            continue
+
+        # В ресторанных чеках количество и цена нередко печатаются строкой
+        # под названием/суммой. Уточняем уже созданную позицию и не создаём
+        # ложный товар из «3.2 ШТ × 1075».
+        detail_qty = QTY_UNIT_LABEL_RE.search(_fix_digit_confusions(text))
+        if detail_qty is not None and (items or pending_name is not None):
+            quantity = _parse_number(detail_qty.group("qty"))
+            unit_price = _parse_number(detail_qty.group("unit"))
+            if quantity and unit_price is not None:
+                expected = quantity * unit_price
+                if pending_name is not None:
+                    name, name_score = pending_name
+                    items.append(
+                        ParsedItem(
+                            name,
+                            quantity,
+                            unit_price,
+                            round(expected, 2),
+                            (entry.score + name_score) / 2,
+                            arithmetic_ok=True,
+                        )
+                    )
+                    last_item_y = entry.y
+                    pending_name = None
+                    pending_numbers = None
+                else:
+                    assert items
+                    previous = items[-1]
+                    if abs(expected - previous.total_price) <= max(
+                        0.03 * previous.total_price, 1.0
+                    ):
+                        previous.quantity = quantity
+                        previous.unit_price = unit_price
+                        previous.arithmetic_ok = True
+                # Даже при повреждённой арифметике это служебная строка
+                # количества, а не самостоятельный товар.
+                continue
+
         item = _try_parse_item(text, entry.score, qty_sum_layout, numeric_group=entry.group)
         if item is not None:
             items.append(item)
@@ -886,7 +1149,11 @@ def parse_receipt(tokens: list[OcrToken]) -> ReceiptResponse:
         if _has_letters(text, minimum=2):
             name = _clean_name(text)
             if name:
-                if MODIFIER_NAME_RE.match(name) and entry.group is None:
+                if (
+                    MODIFIER_NAME_RE.match(name)
+                    and entry.group is None
+                    and pending_numbers is None
+                ):
                     # «Соус Сырный» без цены — модификатор, не позиция.
                     continue
                 # Продолжение многострочного названия предыдущей позиции
@@ -896,6 +1163,7 @@ def parse_receipt(tokens: list[OcrToken]) -> ReceiptResponse:
                 if (
                     header_entry is not None
                     and entry.group is None
+                    and pending_numbers is None
                     and items
                     and last_item_y is not None
                     and entry.y - last_item_y <= 2.4 * median_height
@@ -906,7 +1174,7 @@ def parse_receipt(tokens: list[OcrToken]) -> ReceiptResponse:
                     last_item_y = entry.y
                     pending_name = None
                     continue
-                if not _extract_numbers(text) and _has_letters(text, minimum=3):
+                if _has_letters(text, minimum=3):
                     if (
                         pending_numbers is not None
                         and abs(entry.y - pending_numbers[2]) <= 2.8 * median_height
@@ -926,12 +1194,21 @@ def parse_receipt(tokens: list[OcrToken]) -> ReceiptResponse:
                             if merchant == name:
                                 merchant = None
                             continue
-                    if merchant is None and text_line_index <= 3 and not items:
+                    if (
+                        merchant is None
+                        and text_line_index <= 3
+                        and not items
+                        and not _extract_numbers(text)
+                    ):
                         merchant = name
                     pending_name = (name, entry.score)
                     continue
 
         pending_name = None
+
+    selected_total = _select_total_candidate(total_candidates, entries)
+    if selected_total is not None:
+        total = selected_total
 
     receipt_items = [
         ReceiptItem(
@@ -979,7 +1256,8 @@ def parse_receipt(tokens: list[OcrToken]) -> ReceiptResponse:
                 total = matched
                 confidence = min(0.99, confidence + 0.05)
             else:
-                total = None
+                # Печатный «ИТОГО» на чеке важнее суммы позиций (скидки, НДС,
+                # весовой ритейл). Оставляем total с чека, помечаем mismatch.
                 confidence *= 0.8
                 errors.append("total_mismatch")
 

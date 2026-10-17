@@ -87,7 +87,11 @@ def main() -> None:
 
     for label_file in label_files:
         expected = json.loads(label_file.read_text(encoding="utf-8"))
-        image_path = args.dataset / "images" / expected["image"]
+        image_name = expected.get("image") or expected.get("image_file") or f"{label_file.stem}.jpg"
+        image_path = args.dataset / "images" / image_name
+        if not image_path.exists():
+            print(f"WARN: нет файла {image_path}")
+            continue
         data = image_path.read_bytes()
 
         started = time.monotonic()

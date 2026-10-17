@@ -20,7 +20,9 @@ Java backend ── POST /api/v1/recognize (multipart image) ──► FastAPI
 
 - Контракт ответа: `Skinemsya/docs/integrations/receipt-json-contract.md` (репозиторий бека) — поля `merchant`, `date`, `total`, `currency`, `items[]` (`name`, `quantity`, `unit_price`, `total_price`, `confidence`), `confidence`, `errors`.
 - Ошибки обработки возвращаются валидным JSON с `errors` (`unreadable`, `no_items_found`, `low_confidence`, `total_mismatch`), а не 5xx.
-- Если распознанный итог не сходится с суммой позиций более чем на 1%, `total` отдаётся как `null` c ошибкой `total_mismatch` — иначе бек забраковал бы весь чек.
+- Если распознанный итог не сходится с суммой позиций более чем на 1%, печатный
+  `total` сохраняется, а ответ получает ошибку `total_mismatch`: скидки и
+  пропущенные OCR-строки не должны скрывать фактическую сумму к оплате.
 
 ## Быстрый старт (локально)
 
@@ -78,36 +80,30 @@ docker compose up -d --build   # сервис на http://localhost:8100
 После деплоя в `PRODUCTION_ENV` бека должно быть:
 
 ```bash
-ML_SERVICE_URL=http://172.17.0.1:8001
+ML_SERVICE_URL=http://skinemsya-ml:8000
 ```
 
 ## Дообучение модели под русские чеки
 
-Распознающая модель (rec) дообучается на синтетических строках чеков. Полный цикл:
+Rec-модель дообучается на **синтетике + реальных строках** из [cdek-ocr/receipt-ocr-ru](https://huggingface.co/datasets/cdek-ocr/receipt-ocr-ru). Полный гайд: [`docs/training/cdek-receipt-ocr-ru.md`](docs/training/cdek-receipt-ocr-ru.md).
 
 ```bash
-# 1. Сгенерировать датасет (локально)
-.venv/bin/python -m training.synthgen --count 3000 --out data/synth
-cd data/synth && zip -r ../synth.zip lines rec_gt.txt && cd ../..
+pip install -e '.[train]'
 
-# 2. Обучить на бесплатном GPU в Google Colab
-#    Откройте training/colab/finetune_ppocrv5_rec.ipynb в colab.research.google.com
-#    Пошаговая инструкция для первого раза: docs/colab-guide.md
-#    На выходе: receipt_rec.onnx + receipt_rec_keys.txt -> положить в data/models/
+# CDEK → бенчмарк
+python -m training.cdek.download_and_prepare --out data/cdek
+python -m training.eval_receipts --dataset data/cdek/test
 
-# 3. Сравнить качество с базовой моделью
-.venv/bin/python -m training.synthgen --count 100 --out data/synth_eval --seed 777 --no-lines
-.venv/bin/python scripts/evaluate.py --dataset data/synth_eval
-.venv/bin/python scripts/evaluate.py --dataset data/synth_eval \
-    --rec-model data/models/receipt_rec.onnx --rec-keys data/models/receipt_rec_keys.txt
+# строки для Colab (CDEK crops + synth)
+python -m training.synthgen --count 2000 --out data/synth
+python -m training.cdek.export_rec_lines --synth data/synth --out data/rec_mix
+cd data/rec_mix && zip -r ../cdek_synth.zip lines rec_gt.txt && cd ../..
 
-# 4. Запустить сервис с новой моделью
+# Colab: training/colab/finetune_ppocrv5_rec.ipynb → receipt_rec.onnx
 ML_REC_MODEL_PATH=data/models/receipt_rec.onnx \
 ML_REC_KEYS_PATH=data/models/receipt_rec_keys.txt \
-.venv/bin/uvicorn app.main:app --port 8000
+uvicorn app.main:app --port 8000
 ```
-
-Для оценки на реальных фото: сложите их в `data/real_eval/images/` и опишите разметку в `data/real_eval/labels/*.json` в формате контракта (пример — любой файл из `data/synth_eval/labels/`).
 
 ### Базовые метрики (синтетический eval, 40 чеков, модель без дообучения)
 
