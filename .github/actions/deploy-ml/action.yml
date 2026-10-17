@@ -84,10 +84,12 @@ runs:
         df -h /
         docker system df || true
 
-        # rsync .env + pull образа (~1–2 ГиБ слоёв) — без запаса ENOSPC неизбежен.
+        # Новый тег переиспользует базовые/dependency-слои текущего ML-образа.
+        # 1 ГиБ достаточно для изменившихся слоёв и распаковки; порог 1.5 ГиБ
+        # ложно блокировал VPS с 1469 МиБ свободного места.
         avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
-        if [ "${avail_kb}" -lt 1572864 ]; then
-          echo "ERROR: need at least ~1.5GiB free on / before deploy (have $((avail_kb/1024))MiB)." >&2
+        if [ "${avail_kb}" -lt 1048576 ]; then
+          echo "ERROR: need at least ~1GiB free on / before deploy (have $((avail_kb/1024))MiB)." >&2
           echo "SSH to VPS and free space (docker images, logs, apt cache), then re-run." >&2
           df -h >&2
           docker system df -v >&2 || true
